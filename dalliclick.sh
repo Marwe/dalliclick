@@ -43,13 +43,14 @@ EXIT_BUG=10
 #####################
 # true = 0, false = 1
 #####################
-VERBOSE=1
+VERBOSE=0
 WIDTH=1024
 HEIGHT=766
 # generate a mask image: 
-GENERATE_MASK=0
+GENERATE_MASK=1
 NUMSEGMENTS=10
 RESULTIMAGEBASE_GIVEN=1
+OUTPUTFILEFORMAT=png
 # do all output operations in a temporary dir? where should this be located?
 GENTMPDIR=0
 # OUTPUTDIR=`pwd`
@@ -58,20 +59,29 @@ MASKIMAGENAME="tmp_voronoi_template.png"
 # black and white image (transparency info)
 GRAYMASKDEFAULTFILENAME="tmp_maskimage.png"
 # generate a background image?
-GENERATE_BACKGROUND=0
+GENERATE_BACKGROUND=1
 BACKGROUNDIMAGENAME="tmp_background.png"
+RESIZEIMAGENAME="tmp_resized.png"
+FILLUPCOLOR="black"
 
 # functions
 function usage {
 	echo "This script creates partially occluded image versions of the input image"
-        echo "Usage: $SCRIPTNAME <options> imagefiles" >&2
-	echo "-h (this) help"
-	echo "-v print verbose information"
-	echo "-n number of segments, max. 255"
-	echo "-o output image base name (out -> out_NNN.png)"
-	echo "-b background (canvas) image"
-	echo "-m maskimage (with label gray values 1,2,3,...)"
-	echo "-t do not generate temporary directory (working dir is used)"
+        echo "Usage: $SCRIPTNAME <Options> imagefile..."
+	echo "Options:"
+	echo "-h             Show this help"
+	echo "-v             Increase verbosity (more details on actions)"
+	echo "-n Segments    Number of segments, max. 255 (Default 10)"
+	echo "-o Name        Output image base name (out -> out_NNN.png)"
+	echo "-b File        Background (canvas) image. The output images will have exactly"
+	echo "               the size of the background image."
+	echo "               If this is not specified, an artifical background image will be"
+	echo "               generated."
+	echo "-B color       Color for filling up images in wrong ratio (only relevant with -b)"
+	echo "-m maskimage   User specific mask image with label gray values 1,2,3,..."
+	echo "               If this is not specified a random mask image will be generated."
+	echo "-t             Do not generate temporary directory (working dir is used)"
+	echo "-O format      Format of output files (Default: png)"
         [[ $# -eq 1 ]] && exit $1 || exit $EXIT_FAILURE
 }
 
@@ -101,7 +111,7 @@ generate_voronoi_template(){
 		echo "warning: generate_voronoi_template() number of segments greater 255 ($NSEG), setting to 255"
 	NSEG=255
 	fi
-	if [ $VERBOSE -eq 0 ]; then echo "generate_voronoi_template() WID: $WID, HEI: $HEI, NSEG: $NSEG"; fi
+	if [ $VERBOSE -ne 0 ]; then echo "generate_voronoi_template() WID: $WID, HEI: $HEI, NSEG: $NSEG"; fi
 	# see http://www.imagemagick.org/Usage/canvas/#voronoi
 	CMD="$CONVERT_BIN -size ${WID}x${HEI} "
 	CMD="$CMD -colors 256 -colorspace GRAY "
@@ -118,38 +128,36 @@ generate_voronoi_template(){
 		CMD="$CMD %[fx:rand()*w],%[fx:rand()*h] rgb($i,$i,$i)"
 	done
 		CMD="$CMD ' $TMPMASKIMAGENAME"
-	if [ $VERBOSE -eq 0 ] ; then  echo $CMD; fi
+	if [ $VERBOSE -ne 0 ] ; then  echo $CMD; fi
 	eval $CMD
 	if [ $? -ne 0 ] ; then  echo "could not create maskimage '$TMPMASKIMAGENAME'"; fi
 	
 }
 
 function dallicleanup(){
-    #if [ $VERBOSE -eq 0 ] ; then  echo "cleaning up bg"; fi
+    #if [ $VERBOSE -ne 0 ] ; then  echo "cleaning up bg"; fi
     # cleanup *generated* files
-    if [ $GENERATE_BACKGROUND -eq 0 ] ; then
+    if [ $GENERATE_BACKGROUND -ne 0 ] ; then
       # # remove 'starting' canvas
-      if [ -f "$BACKGROUNDIMAGE" ] ; then
-	rm "$BACKGROUNDIMAGE"
-      fi
+	rm -f "$BACKGROUNDIMAGE"
     fi
-    #if [ $VERBOSE -eq 0 ] ; then  echo "cleaning up mask"; fi
-    if [ $GENERATE_MASK -eq 0 ] ; then
+    #if [ $VERBOSE -ne 0 ] ; then  echo "cleaning up mask"; fi
+    if [ $GENERATE_MASK -ne 0 ] ; then
       # # remove mask image
-      if [ -f "$TMPMASKIMAGENAME" ] ; then
-	rm "$TMPMASKIMAGENAME"
-      fi
+	rm -f "$TMPMASKIMAGENAME"
     fi
-    if [ -f "$GRAYMASKFILE" ] ; then
-      rm "$GRAYMASKFILE"
+    if [ "$INPUTIMAGERESIZED" ]; then
+	    rm -f "$INPUTIMAGERESIZED"
     fi
+    rm -f "$GRAYMASKFILE"
     # cleanup the temporary directory, if that was created
-    #if [ $VERBOSE -eq 0 ] ; then  echo "cleaning up tmpdir"; fi
+    #if [ $VERBOSE -ne 0 ] ; then  echo "cleaning up tmpdir"; fi
     if [ $GENTMPDIR -eq 0 ] ; then
 	    if [ -d "$TMPDIR" ] ; then
 	      rm -rf "$TMPDIR"
 	    fi
     fi
+
 }
 
 function failbail(){
@@ -174,23 +182,27 @@ fi
 # parse options
 # Option -h (help) should always be there
 # if you have an option argument to be parsed use ':' after option
-while getopts ':n:i:b:m:o:vht' OPTION ; do
+while getopts ':n:i:b:m:o:O:B:vht' OPTION ; do
         case $OPTION in
-        v)        VERBOSE=0
+	v)        VERBOSE=$((VERBOSE+1))
                 ;;
         h)        usage $EXIT_SUCCESS
                 ;;
         n)        NUMSEGMENTS="$OPTARG"
                 ;;
 	m)	MASKIMAGE="$OPTARG"
-		GENERATE_MASK=1
+		GENERATE_MASK=0
 		;;
 	o)	RESULTIMAGEBASE="$OPTARG"
 		RESULTIMAGEBASE_GIVEN=0
 		echo "given basename: "$RESULTIMAGEBASE;
 		;;
+	O)      OUTPUTFILEFORMAT="$OPTARG"
+	        ;;
 	b)	BACKGROUNDIMAGENAME="$OPTARG"
-		GENERATE_BACKGROUND=1
+		GENERATE_BACKGROUND=0
+		;;
+	B)      FILLUPCOLOR="$OPTARG"
 		;;
         t)      GENTMPDIR=1
                 ;;
@@ -224,15 +236,40 @@ INIMGCNT=""
 
 for INPUTIMAGE in "$@"
 do
-	if [ $VERBOSE -eq 0 ] ; then  echo "processing $INPUTIMAGE"; fi
+	if [ $VERBOSE -ne 0 ] ; then  echo "processing $INPUTIMAGE"; fi
 
-	WIDTH=`identify -format "%w" "$INPUTIMAGE"`
-	HEIGHT=`identify -format "%h" "$INPUTIMAGE"`
-	if [ -z "$WIDTH"  -o -z "$HEIGHT" ] ; then failbail "cannot identify size of image $INPUTIMAGE" ; fi
-	if [ $VERBOSE -eq 0 ] ; then  echo "[debug] imagesize: $IMGSIZE $WIDTH $HEIGHT"; fi
+	if [ $GENERATE_BACKGROUND -ne 0 ] ; then
+		WIDTH=`identify -format "%w" "$INPUTIMAGE"`
+		HEIGHT=`identify -format "%h" "$INPUTIMAGE"`
+		if [ -z "$WIDTH"  -o -z "$HEIGHT" ] ; then 
+			failbail "cannot identify size of image $INPUTIMAGE" ; 
+		fi
+		# do this in the temporary directory
+		BACKGROUNDIMAGE="$TMPDIR/$BACKGROUNDIMAGENAME"
+		# generate 'starting' canvas
+		CMD="$CONVERT_BIN -size ${WIDTH}x$HEIGHT plasma:fractal $BACKGROUNDIMAGE"
+		if [ $VERBOSE -ne 0 ] ; then  echo $CMD; fi
+		eval $CMD
+		IMAGETOUSE=$INPUTIMAGE
+	else
+		BACKGROUNDIMAGE="$BACKGROUNDIMAGENAME"
+		WIDTH=`identify -format "%w" "$BACKGROUNDIMAGE"`
+		HEIGHT=`identify -format "%h" "$BACKGROUNDIMAGE"`
+		if [ -z "$WIDTH"  -o -z "$HEIGHT" ] ; then 
+			failbail "cannot identify size of image $BACKGROUNDIMAGE" ; 
+		fi
+		INPUTIMAGERESIZED="$TMPDIR/$RESIZEIMAGENAME"
+		CMD="$CONVERT_BIN \"$INPUTIMAGE\" -auto-orient -resize ${WIDTH}x$HEIGHT \
+			-background $FILLUPCOLOR -compose Copy -gravity center -extent ${WIDTH}x$HEIGHT \"$INPUTIMAGERESIZED\""
+		if [ $VERBOSE -ne 0 ] ; then  echo $CMD; fi
+		eval $CMD
+		IMAGETOUSE=$INPUTIMAGERESIZED
+	fi
+
+	if [ $VERBOSE -ne 0 ] ; then  echo "[debug] imagesize: $WIDTH $HEIGHT"; fi
 	
 	# generate a mask image
-	if [ $GENERATE_MASK -eq 0 ] ; then
+	if [ $GENERATE_MASK -ne 0 ] ; then
 		TMPMASKIMAGENAME="$TMPDIR/$MASKIMAGENAME"
 		generate_voronoi_template "$WIDTH" "$HEIGHT" "$NUMSEGMENTS" 
 	else
@@ -242,16 +279,6 @@ do
 	# debug: convert labelled mask image to 256 colors
 	# convert -colors 256 -colorspace GRAY $MASKIMAGENAME ?
 	
-	if [ $GENERATE_BACKGROUND -eq 0 ] ; then
-		# do this in the temporary directory
-		BACKGROUNDIMAGE="$TMPDIR/$BACKGROUNDIMAGENAME"
-		# generate 'starting' canvas
-		CMD="$CONVERT_BIN -size ${WIDTH}x$HEIGHT plasma:fractal $BACKGROUNDIMAGE"
-		if [ $VERBOSE -eq 0 ] ; then  echo $CMD; fi
-		eval $CMD
-	else
-		BACKGROUNDIMAGE="$BACKGROUNDIMAGENAME"
-	fi
 	
 	# output name
 	if [ $RESULTIMAGEBASE_GIVEN -ne 0 ] 
@@ -261,7 +288,7 @@ do
 	
 	for THRESHOLD in `seq -w 0 1 "$NUMSEGMENTS"`
 	do
-		RESULTIMAGE="${RESULTIMAGEBASE}_$THRESHOLD.png"
+		RESULTIMAGE="${RESULTIMAGEBASE}_$THRESHOLD.$OUTPUTFILEFORMAT"
 		# debug: THRESHOLD=2
 		# generate black/white image from mask
 		# this is something to be worked out: 
@@ -271,14 +298,14 @@ do
 		GRAYMASKFILE="$TMPDIR/${GRAYMASKDEFAULTFILENAME}"
 		CMD="$CONVERT_BIN \"$TMPMASKIMAGENAME\" -colors 256 -threshold $GRAYTHRESH \"$GRAYMASKFILE\""
 		# CMD="convert $MASKIMAGENAME -threshold $THRESHOLD $GRAYMASKFILE"
-		if [ $VERBOSE -eq 0 ]; then  echo $CMD ; fi
+		if [ $VERBOSE -ne 0 ]; then  echo $CMD ; fi
 		eval $CMD
 		
 		# mask the image
-		CMD="$COMPOSITE_BIN \"$BACKGROUNDIMAGE\" \"$INPUTIMAGE\" \"$GRAYMASKFILE\" \"$RESULTIMAGE\""
-		if [ $VERBOSE -eq 0 ]; then  echo "$CMD" ; fi
+		CMD="$COMPOSITE_BIN \"$BACKGROUNDIMAGE\" \"$IMAGETOUSE\" \"$GRAYMASKFILE\" \"$RESULTIMAGE\""
+		if [ $VERBOSE -ne 0 ]; then  echo "$CMD" ; fi
 		eval $CMD
-		if [ $VERBOSE -eq 0 ]; then  echo "result image written to "$RESULTIMAGE ; fi
+		if [ $VERBOSE -ne 0 ]; then  echo "result image written to "$RESULTIMAGE ; fi
 	done
 done
 
